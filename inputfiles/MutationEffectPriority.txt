@@ -1,0 +1,18 @@
+VEP	Priority	VEPtoMAF
+missense_variant	6	Missense_Mutation
+synonymous_variant	9	Silent
+splice_region_variant	8	Splice_Region
+stop_gained	3	Nonsense_Mutation
+intron_variant	14	Intron
+3_prime_UTR_variant	12	3'UTR
+frameshift_variant	3	Frame_Shift_Del; Frame_Shift_Ins
+5_prime_UTR_variant	12	5'UTR
+splice_acceptor_variant	2	Splice_Site
+inframe_insertion	5	In_Frame_Ins
+stop_lost	3	Nonstop_Mutation
+inframe_deletion	5	In_Frame_Del
+splice_donor_variant	2	Splice_Site
+coding_sequence_variant	11	Missense_Mutation
+stop_retained_variant	9	Silent
+start_lost	4	Translation_Start_Site
+incomplete_terminal_codon_variant	10	Silent
