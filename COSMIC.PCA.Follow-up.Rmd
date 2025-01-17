@@ -1,0 +1,327 @@
+---
+title: "Cosmic PCA and Follow-up "
+author: "Vaibhavi Pathak, Minal Caliskan"
+date: "02/01/2024"
+output: html_document
+---
+
+```{r, Setup, include=FALSE}
+# Load libraries
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(wesanderson)
+library(viridis)
+library(RColorBrewer)
+library(writexl)
+library(readxl)
+library(tidyr)
+library(stringr)
+library(tools)
+library(data.table)
+library(ontologyIndex)
+library(DEGreport)
+library(reshape)
+library(factoextra)
+library(ggcorrplot)
+library(usethis)
+#usethis::edit_r_environ("project")
+
+# Define paths
+base_dir <- "[PATH_TO_DATA]" #replace this with the data location
+input_dir <- file.path(base_dir,"inputfiles")
+output_dir <- file.path(base_dir,"outputfiles")
+
+```
+
+
+```{r, Genome-wide Variant Matrix, include=FALSE}
+# Genome-wide Variant Matrix
+ngenomic <- fread(file.path(output_dir, "NSCLC.Genomic.Clean.txt.gz"), data.table=FALSE)
+all_subjects <- unique(ngenomic$INDIVIDUAL_ID)
+
+# Generate Variant PCA Matrix                   
+pcavarmatrix <- function(data, subjects) {
+  unique_features <- unique(data$GENOMIC_MUTATION_ID[!is.na(data$GENOMIC_MUTATION_ID) & data$GENOMIC_MUTATION_ID != ""])
+  unique_subjects <- subjects
+  result <- data.frame(INDIVIDUAL_ID = unique_subjects)
+  result[,unique_features] <- 0
+  subject_index <- match(data$INDIVIDUAL_ID, unique_subjects)
+  feature_index <- match(data$GENOMIC_MUTATION_ID, unique_features)
+  valid_idx <- !is.na(subject_index) & !is.na(feature_index)
+  temp_matrix <- as.matrix(result[,-1])
+  temp_matrix[cbind(subject_index[valid_idx], feature_index[valid_idx])] <- 1
+  result[,-1] <- temp_matrix
+  return(result)
+}
+
+# Genome-wide Variant PCA
+gvarmatrix<- pcavarmatrix(ngenomic, all_subjects)
+gvarsubjects <- gvarmatrix[,1]
+gvarmatrix <- gvarmatrix[,-1]
+
+# Include features present in at least 2 subjects
+col_sums <- colSums(gvarmatrix)
+cols_to_keep <- names(col_sums[col_sums>1])
+gvarmatrix <- gvarmatrix[,cols_to_keep]
+
+# PCA
+pca_gvar <-prcomp(gvarmatrix, scale.= FALSE, center=TRUE, rank=20) 
+# PCA Scores
+pca_gvar_scores <- pca_gvar$x
+write.table(pca_gvar_scores, file.path(output_dir, "PCA_GVar_Scores.txt"), sep="\t", quote=FALSE)
+# PCA Loadings
+pca_gvar_loadings <- pca_gvar$rotation 
+write.table(pca_gvar_loadings, file.path(output_dir, "PCA_GVar_Loadings.txt"), sep="\t", quote=FALSE)
+# Proportion of Variance
+pca_gvar_variance <- pca_gvar$sdev^2/sum(pca_gvar$sdev^2)
+write.table(pca_gvar_variance, file.path(output_dir, "PCA_GVar_Variance.txt"), sep="\t", quote=FALSE)
+
+#PCA Plot
+ggplot(pca_gvar_scores, aes(x=PC1, y=PC2)) +
+  geom_point(color="#073642") +
+  xlab(paste0("PC 1 : ", format(pca_gvar_variance[1]*100, digits=3), "%")) +
+  ylab(paste0("PC 2 : ", format(pca_gvar_variance[2]*100, digits=2), "%")) +
+  theme_classic() +
+  scale_color_manual(values=colorRampPalette(brewer.pal(8,"Dark2"))(31)) +
+  theme(legend.title = element_text(size=8), axis.text = element_text(size=8), legend.text = element_text(size=8),
+        axis.title = element_text(size=12),
+        axis.line = element_line(colour= "#b58900", size=0),
+        panel.border=element_rect(colour= "#b58900", fill=NA, size=0.3))
+
+ggsave(file.path(output_dir,"PCA.GVar.Plot.pdf"), height=2.2, width=2.6, pointsize=12, dpi=600)
+
+```
+
+
+```{r, Genome-wide Gene Matrix, include=FALSE}
+# Genome-wide Gene Matrix
+ngenomic <- fread(file.path(output_dir, "NSCLC.Genomic.Clean.txt.gz"), data.table=FALSE)
+all_subjects <- unique(ngenomic$INDIVIDUAL_ID)
+
+# Generate Gene PCA Matrix                   
+pcagenematrix <- function(data, subjects) {
+  unique_features <- unique(data$GENE_SYMBOL[!is.na(data$GENE_SYMBOL) & data$GENE_SYMBOL != ""])
+  unique_subjects <- subjects
+  result <- data.frame(INDIVIDUAL_ID = unique_subjects)
+  result[,unique_features] <- 0
+  subject_index <- match(data$INDIVIDUAL_ID, unique_subjects)
+  feature_index <- match(data$GENE_SYMBOL, unique_features)
+  valid_idx <- !is.na(subject_index) & !is.na(feature_index)
+  temp_matrix <- as.matrix(result[,-1])
+  temp_matrix[cbind(subject_index[valid_idx], feature_index[valid_idx])] <- 1
+  result[,-1] <- temp_matrix
+  return(result)
+}
+# Generate PCA Matrix                  
+ggenematrix <- pcagenematrix(ngenomic, all_subjects)
+ggenesubjects <- ggenematrix[,1]
+ggenematrix <- ggenematrix[,-1]
+
+# Include features present in at least 2 subjects
+col_sums <- colSums(ggenematrix)
+cols_to_keep <- names(col_sums[col_sums>1])
+ggenematrix <- ggenematrix[,cols_to_keep]
+
+# PCA
+pca_ggene <-prcomp(ggenematrix, scale.= FALSE, center=TRUE, rank=20) 
+# PCA Scores
+pca_ggene_scores <- pca_ggene$x
+write.table(pca_ggene_scores, file.path(output_dir, "PCA_GGene_Scores.txt"), sep="\t", quote=FALSE)
+# PCA Loadings
+pca_ggene_loadings <- pca_ggene$rotation 
+write.table(pca_ggene_loadings, file.path(output_dir, "PCA_GGene_Loadings.txt"), sep="\t", quote=FALSE)
+# Proportion of Variance
+pca_ggene_variance <- pca_ggene$sdev^2/sum(pca_ggene$sdev^2)
+write.table(pca_ggene_variance, file.path(output_dir, "PCA_GGene_Variance.txt"), sep="\t", quote=FALSE)
+
+#PCA Plot
+ggplot(pca_ggene_scores, aes(x=PC1, y=PC2)) +
+  geom_point(color="#073642") +
+  xlab(paste0("PC 1 : ", format(pca_ggene_variance[1]*100, digits=3), "%")) +
+  ylab(paste0("PC 2 : ", format(pca_ggene_variance[2]*100, digits=2), "%")) +
+  theme_classic() +
+  scale_color_manual(values=colorRampPalette(brewer.pal(8,"Dark2"))(31)) +
+  theme(legend.title = element_text(size=8), axis.text = element_text(size=8), legend.text = element_text(size=8),
+        axis.title = element_text(size=12),
+        axis.line = element_line(colour= "#b58900", size=0),
+        panel.border=element_rect(colour= "#b58900", fill=NA, size=0.3))
+
+ggsave(file.path(output_dir,"PCA.GGene.Plot.pdf"), height=2.2, width=2.6, pointsize=12, dpi=600)
+
+```
+
+
+```{r, Cancer Variant Matrix, include=FALSE}
+# CGC Genes, CMC Mutations
+cmutation <- fread(file.path(input_dir, "CancerMutationCensus_AllData_v98_GRCh38.tsv.gz"), data.table=FALSE)
+cgc <- cmutation %>% filter (CGC_TIER %in% c(1,2)) %>% filter (!is.na(GENE_NAME)) %>% filter (GENE_NAME != "")
+cgc_cmc <- cgc %>% filter (MUTATION_SIGNIFICANCE_TIER %in% c(1,2,3)) %>% filter (!is.na(GENOMIC_MUTATION_ID)) %>% filter (GENOMIC_MUTATION_ID != "")
+ncancer <- ngenomic %>% filter (GENOMIC_MUTATION_ID %in% cgc_cmc$GENOMIC_MUTATION_ID)
+write.table(ncancer, file.path(output_dir,"NSCLC.CGCCMC.txt.gz"), sep="\t", quote=FALSE, row.names=FALSE)
+
+# Cancer Variant PCA
+cancervarmatrix<- pcavarmatrix(ncancer, all_subjects)
+cancervarsubjects <- cancervarmatrix[,1]
+cancervarmatrix <- cancervarmatrix[,-1]
+
+# Include features present in at least 2 subjects
+col_sums <- colSums(cancervarmatrix)
+cols_to_keep <- names(col_sums[col_sums>1])
+cancervarmatrix <- cancervarmatrix[,cols_to_keep]
+
+# PCA
+pca_cancervar <-prcomp(cancervarmatrix, scale.= FALSE, center=TRUE, rank=20) 
+# PCA Scores
+pca_cancervar_scores <- pca_cancervar$x
+write.table(pca_cancervar_scores, file.path(output_dir, "PCA_CancerVar_Scores.txt"), sep="\t", quote=FALSE)
+# PCA Loadings
+pca_cancervar_loadings <- pca_cancervar$rotation 
+write.table(pca_cancervar_loadings, file.path(output_dir, "PCA_CancerVar_Loadings.txt"), sep="\t", quote=FALSE)
+# Proportion of Variance
+pca_cancervar_variance <- pca_cancervar$sdev^2/sum(pca_cancervar$sdev^2)
+write.table(pca_cancervar_variance, file.path(output_dir, "PCA_CancerVar_Variance.txt"), sep="\t", quote=FALSE)
+
+#PCA Plot
+ggplot(pca_cancervar_scores, aes(x=PC1, y=PC2)) +
+  geom_point(color="#073642") +
+  xlab(paste0("PC 1 : ", format(pca_cancervar_variance[1]*100, digits=3), "%")) +
+  ylab(paste0("PC 2 : ", format(pca_cancervar_variance[2]*100, digits=2), "%")) +
+  theme_classic() +
+  scale_color_manual(values=colorRampPalette(brewer.pal(8,"Dark2"))(31)) +
+  theme(legend.title = element_text(size=8), axis.text = element_text(size=8), legend.text = element_text(size=8),
+        axis.title = element_text(size=12),
+        axis.line = element_line(colour= "#2ba198", size=0),
+        panel.border=element_rect(colour= "#2ba198", fill=NA, size=0.3))
+
+ggsave(file.path(output_dir,"PCA.CancerVar.Plot.pdf"), height=2.2, width=2.6, pointsize=12, dpi=600)
+
+```
+
+
+```{r, Cancer Gene Matrix, include=FALSE}
+# Cancer Gene PCA
+cancergenematrix<- pcagenematrix(ncancer, all_subjects)
+cancergenesubjects <- cancergenematrix[,1]
+cancergenematrix <- cancergenematrix[,-1]
+
+# Include features present in at least 2 subjects
+col_sums <- colSums(cancergenematrix)
+cols_to_keep <- names(col_sums[col_sums>1])
+cancergenematrix <- cancergenematrix[,cols_to_keep]
+
+# PCA
+pca_cancergene <-prcomp(cancergenematrix, scale.= FALSE, center=TRUE, rank=20) 
+# PCA Scores
+pca_cancergene_scores <- pca_cancergene$x
+write.table(pca_cancergene_scores, file.path(output_dir, "PCA_CancerGene_Scores.txt"), sep="\t", quote=FALSE)
+# PCA Loadings
+pca_cancergene_loadings <- pca_cancergene$rotation 
+write.table(pca_cancergene_loadings, file.path(output_dir, "PCA_CancerGene_Loadings.txt"), sep="\t", quote=FALSE)
+# Proportion of Variance
+pca_cancergene_variance <- pca_cancergene$sdev^2/sum(pca_cancergene$sdev^2)
+write.table(pca_cancergene_variance, file.path(output_dir, "PCA_CancerGene_Variance.txt"), sep="\t", quote=FALSE)
+
+#PCA Plot
+ggplot(pca_cancergene_scores, aes(x=PC1, y=PC2)) +
+  geom_point(color="#073642") +
+  xlab(paste0("PC 1 : ", format(pca_cancergene_variance[1]*100, digits=3), "%")) +
+  ylab(paste0("PC 2 : ", format(pca_cancergene_variance[2]*100, digits=2), "%")) +
+  theme_classic() +
+  scale_color_manual(values=colorRampPalette(brewer.pal(8,"Dark2"))(31)) +
+  theme(legend.title = element_text(size=8), axis.text = element_text(size=8), legend.text = element_text(size=8),
+        axis.title = element_text(size=12),
+        axis.line = element_line(colour= "#2ba198", size=0),
+        panel.border=element_rect(colour= "#2ba198", fill=NA, size=0.3))
+
+ggsave(file.path(output_dir,"PCA.CancerGene.Plot.pdf"), height=2.2, width=2.6, pointsize=12, dpi=600)
+
+```
+
+
+```{r, degCorCov, include=FALSE}
+# Merge PCs and Covariates
+pca_cancergene_scores <- read.delim(file.path(output_dir, "PCA_CancerGene_Scores.txt"))
+ngenomic_covariates <- ngenomic %>% distinct(INDIVIDUAL_ID, .keep_all = TRUE) %>%
+  select (STUDY_NAME, GENDER, EFO, SAMPLE_TYPE, ASSAY_NAME, TUMOUR_SOURCE, NORMAL_TISSUE_TESTED, AGE, ETHNICITY, SMOKING_STATUS)
+
+pca_covs <- cbind(pca_cancergene_scores$PC1, pca_cancergene_scores$PC2, ngenomic_covariates)
+pca_covs <- pca_covs %>% 
+  dplyr::rename("Study ID" = "STUDY_NAME",
+                "Sex" = "GENDER",
+                "EFO ID" = "EFO",
+                "Sample Type" = "SAMPLE_TYPE",
+                "Assay Name" = "ASSAY_NAME",
+                "Tumor Source" = "TUMOUR_SOURCE",
+                "Paired Data" = "NORMAL_TISSUE_TESTED",
+                "Age" = "AGE",
+                "Ethnicity" = "ETHNICITY",
+                "Smoking Status" = "SMOKING_STATUS",
+                "PC1" = "pca_cancergene_scores$PC1",
+                "PC2" = "pca_cancergene_scores$PC2")
+
+# degCorCov Correlation Between PCs and Covariates
+pca_covs_matrix <- degCorCov(pca_covs)
+pca_covs_matrix <- pca_covs_matrix$corMat
+for (i in 1:nrow(pca_covs_matrix)){
+  for (j in 1:ncol(pca_covs_matrix)) {
+    if (class(pca_covs_matrix[i,j]) == "numeric") {
+      pca_covs_matrix[i,j] <- abs(pca_covs_matrix[i,j])
+    }
+  }
+}
+
+#Plot degCorCov Correlation Coefficients
+ggcorrplot::ggcorrplot(pca_covs_matrix, lab_size = 4.5, p.mat = NULL, 
+                       insig = c("pch", "blank"), pch = 1, pch.col = "black", pch.cex =1,
+                       tl.cex = 18, method="circle") +
+  theme(axis.text.x = element_text(margin=margin(-2,0,0,0)), axis.text.y = element_text(margin=margin(0,-2,0,0))) +
+  geom_vline(xintercept=1:ncol(mtcars)-0.5, colour="white", size=2) +
+  geom_hline(yintercept=1:ncol(mtcars)-0.5, colour="white", size=2) + 
+  scale_fill_gradient2(low = "#dae0b2", high = "#859900", breaks=c(0, 1), limit=c(0, 1)) 
+
+ggsave(file.path(output_dir,"PCA_CovariateCorrelation.pdf"), height=6, width=8.4, pointsize=12, dpi=600)
+
+```
+
+
+```{r, PCA Biplot, include=FALSE}
+# PCA Biplot
+fviz_pca_biplot(pca_cancergene, label="var", labelsize=4, col.var = "#dc322f", col.ind = "#93a1a1", pointsize=0.5) +
+  theme_minimal() +
+  ggtitle("") + 
+  xlab(paste0("PC 1 : ", format(pca_cancergene_variance[1]*100, digits=3), "%")) +
+  ylab(paste0("PC 2 : ", format(pca_cancergene_variance[2]*100, digits=2), "%")) +
+  theme(legend.title = element_text(size=8), axis.text = element_text(size=8), legend.text = element_text(size=8),
+        axis.title = element_text(size=12),
+        axis.line = element_line(colour= "darkgray", size=0),
+        panel.border=element_rect(colour= "darkgray", fill=NA, size=0.3))
+
+ggsave(file.path(output_dir,"PCA.Biplot.pdf"), height=2.7, width = 3.3, pointsize=12, dpi=600)
+
+```
+
+
+```{r, PCA TP53.KRAS Follow-up include=FALSE}
+# PCA CRGPV GENE, NOT-SCALED, 4 groups follow-up
+cancergenematrix$TP53_KRAS <- paste(cancergenematrix$TP53, cancergenematrix$KRAS, sep="_")
+pca_covs <- cbind(pca_cancergene_scores, cancergenematrix$TP53_KRAS)
+pca_covs <- pca_covs %>% 
+  dplyr::rename("TP53_KRAS" = "cancergenematrix$TP53_KRAS")
+
+# PCA plot
+ggplot(pca_covs, aes(x=PC1, y=PC2, color=TP53_KRAS)) +
+  geom_point() +
+  xlab(paste0("PC 1 : ", format(pca_cancergene_variance[1]*100, digits=3), "%")) +
+  ylab(paste0("PC 2 : ", format(pca_cancergene_variance[2]*100, digits=3), "%")) +
+  theme_minimal() +
+  ggtitle("") + 
+  scale_color_manual(values=colorRampPalette(brewer.pal(8,"Dark2"))(4)) +
+  theme(legend.title = element_text(size=10), axis.text = element_text(size=12), legend.text = element_text(size=10),
+        axis.title = element_text(size=12),
+        axis.line = element_line(colour= "darkgray", size=0),
+        panel.border=element_rect(colour= "darkgray", fill=NA, size=0.3))
+
+ggsave(file.path(output_dir,"PCA.TP53KRAS.ColorCoded.pdf"), height=2.7, width = 4, pointsize=12, dpi=600)
+
+```

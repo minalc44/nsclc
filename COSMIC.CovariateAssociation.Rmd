@@ -1,0 +1,172 @@
+---
+title: "Genotype Covariate Association"
+author: "Minal Caliskan, Vaibhavi Pathak"
+date: "03/20/2024"
+output: html_document
+---
+
+```{r, Setup, include=FALSE}
+# Load libraries
+library(dplyr)
+library(ggplot2)
+library(wesanderson)
+library(viridis)
+library(RColorBrewer)
+library(writexl)
+library(readxl)
+library(tidyr)
+library(stringr)
+library(tools)
+library(data.table)
+library(ggpubr)
+library(ggrepel)
+library(lmtest)
+library(grid)
+
+# Define paths
+base_dir <- "[PATH_TO_DATA]" #replace this with the data location
+input_dir <- file.path(base_dir,"inputfiles")
+output_dir <- file.path(base_dir,"outputfiles")
+
+```
+
+
+```{r, Cancer Gene Matrix, include=FALSE}
+# Cancer Gene Matrix data
+ncancer <- fread(file.path(output_dir, "NSCLC.CGCCMC.txt.gz"), data.table=FALSE)
+ngenomic <- fread(file.path(output_dir, "NSCLC.Genomic.Clean.txt.gz"), data.table=FALSE)
+select_subjects <- ngenomic %>% filter (GENDER %in% c("f", "m")) %>% 
+  filter (ETHNICITY %in% c("European", "Asian")) %>%
+  filter (EFO %in% c("EFO:0000571", "EFO:0000708")) %>%
+  filter (SMOKING_STATUS %in% c("smoker", "nonsmoker")) %>% select(INDIVIDUAL_ID) %>% distinct() %>% pull(INDIVIDUAL_ID)
+
+# Generate Gene PCA Matrix  
+pcagenematrix <- function(data, subjects) {
+  unique_features <- unique(data$GENE_SYMBOL[!is.na(data$GENE_SYMBOL) & data$GENE_SYMBOL != ""])
+  unique_subjects <- subjects
+  result <- data.frame(INDIVIDUAL_ID = unique_subjects)
+  result[,unique_features] <- 0
+  subject_index <- match(data$INDIVIDUAL_ID, unique_subjects)
+  feature_index <- match(data$GENE_SYMBOL, unique_features)
+  valid_idx <- !is.na(subject_index) & !is.na(feature_index)
+  temp_matrix <- as.matrix(result[,-1])
+  temp_matrix[cbind(subject_index[valid_idx], feature_index[valid_idx])] <- 1
+  result[,-1] <- temp_matrix
+  return(result)
+}
+cancergenematrix<- pcagenematrix(ncancer, select_subjects)
+
+# Pull Covariates
+select_covariates <- ngenomic %>% distinct(INDIVIDUAL_ID, .keep_all = TRUE) %>%
+  select (INDIVIDUAL_ID, GENDER, EFO, ETHNICITY, SMOKING_STATUS) %>% filter (INDIVIDUAL_ID %in% cancergenematrix$INDIVIDUAL_ID)
+
+```
+
+
+```{r, Logistic Regression, include=FALSE}
+# Logistic Regression
+cancergenematrix <- cancergenematrix %>% 
+  rename("BIVM_ERCC5" = "BIVM-ERCC5") %>% 
+  rename("NKX2_1" = "NKX2-1")
+
+df <- left_join(cancergenematrix, select_covariates)
+gene_cols <- colnames(cancergenematrix)[-1]
+covars <- c("GENDER", "EFO", "ETHNICITY", "SMOKING_STATUS")
+
+# For each covariate
+for(excluded_var in covars) {
+  results_df <- data.frame()
+  # For each gene as outcome
+for (gene in gene_cols) {
+  if(length(unique(df[[gene]])) > 1) {
+    df[[gene]] <- as.factor(df[[gene]])
+    #Full model
+    full_formula <- as.formula(paste(gene, "~", paste(covars, collapse = " + ")))
+    full_model <- glm(full_formula, data=df, family="binomial")
+    #Reduced model
+    remaining_vars <- covars[covars != excluded_var]
+    reduced_formula <- as.formula(paste(gene, "~", paste(remaining_vars, collapse = " + ")))
+    reduced_model <- glm(reduced_formula, data=df, family="binomial")
+    lr_results <- lrtest(reduced_model, full_model)
+    #All genes results
+    results_df <- rbind(results_df, data.frame(gene=gene, pvalue = lr_results$`Pr(>Chisq)`[2]))
+  }
+}
+#BH-adjusted q-values
+results_df$qvalue <- p.adjust(results_df$pvalue, method="BH")
+#Write results
+write.table(results_df, file.path(output_dir, paste0("GLM.Results_",excluded_var, ".txt")), sep="\t", quote=FALSE, row.names = FALSE)
+}
+
+```
+
+```{r, Logistic Regression Follow-up, include=FALSE}
+# Arrange Results
+sex_df <- read.delim(file.path(output_dir, "GLM.Results_GENDER.txt")) %>% 
+  mutate(gene = case_when(gene == "BIVM_ERCC5" ~ "BIVM-ERCC5", gene == "NKX2_1" ~ "NKX2-1", TRUE ~ gene)) %>%
+  arrange(pvalue) %>% 
+  mutate(TYPE = "Sex") %>% 
+  mutate(COLOR = if_else(qvalue >=0.05, "#002b36","#dc322f")) %>%
+  mutate(OBSERVED = -log10(pvalue)) %>%
+  mutate(EXPECTED = -log10((1:n())/n()))
+
+eth_df <- read.delim(file.path(output_dir, "GLM.Results_ETHNICITY.txt")) %>% 
+  mutate(gene = case_when(gene == "BIVM_ERCC5" ~ "BIVM-ERCC5", gene == "NKX2_1" ~ "NKX2-1", TRUE ~ gene)) %>%
+  arrange(pvalue) %>% 
+  mutate(TYPE = "Ethnicity") %>% 
+  mutate(COLOR = if_else(qvalue >=0.05, "#002b36","#dc322f")) %>%
+  mutate(OBSERVED = -log10(pvalue)) %>%
+  mutate(EXPECTED = -log10((1:n())/n()))
+
+efo_df <- read.delim(file.path(output_dir, "GLM.Results_EFO.txt")) %>% 
+  mutate(gene = case_when(gene == "BIVM_ERCC5" ~ "BIVM-ERCC5", gene == "NKX2_1" ~ "NKX2-1", TRUE ~ gene)) %>%
+  arrange(pvalue) %>% 
+  mutate(TYPE = "Disease Subtype") %>% 
+  mutate(COLOR = if_else(qvalue >=0.05, "#002b36","#dc322f")) %>%
+  mutate(OBSERVED = -log10(pvalue)) %>%
+  mutate(EXPECTED = -log10((1:n())/n()))
+
+smoking_df <- read.delim(file.path(output_dir, "GLM.Results_SMOKING_STATUS.txt")) %>% 
+  mutate(gene = case_when(gene == "BIVM_ERCC5" ~ "BIVM-ERCC5", gene == "NKX2_1" ~ "NKX2-1", TRUE ~ gene)) %>%
+  arrange(pvalue) %>% 
+  mutate(TYPE = "Smoking Status") %>% 
+  mutate(COLOR = if_else(qvalue >=0.05, "#002b36","#dc322f")) %>%
+  mutate(OBSERVED = -log10(pvalue)) %>%
+  mutate(EXPECTED = -log10((1:n())/n()))
+
+##QQ Plots
+combined_df <- rbind(sex_df, eth_df, efo_df, smoking_df) %>%
+  mutate(TYPE = factor(TYPE, levels=c("Sex", "Ethnicity", "Disease Subtype", "Smoking Status")))
+
+p <- ggplot(combined_df ) + 
+  geom_point(aes(EXPECTED, OBSERVED), shape=19, size=1, color = combined_df$COLOR) + 
+  geom_abline(intercept = 0, slope=1, alpha=0.5) + 
+  xlab("Expected -Log10(p)") +
+  ylab("Observed -Log10(p)") + 
+  ggtitle("") + 
+  theme_bw() +
+  facet_wrap(~TYPE, ncol=4) + 
+    theme(legend.position = "none", legend.title = element_blank(), axis.text = element_text(size=12), 
+        axis.title = element_text(size=16), axis.text.y = element_text(color="black"),
+        axis.line = element_line(colour= "darkgray", size=0),
+        panel.border=element_rect(colour= "darkgray", fill=NA, size=0.3), strip.background = element_rect(size=0.5), strip.text = element_text(size=14),
+        legend.key.height = unit(0.2, 'cm'), legend.key.width = unit (0.4, 'cm'),
+        plot.title = element_text(size=16, face="bold",hjust=0.5), plot.margin = margin(,0.3,,, "cm")) +
+  ggrepel::geom_label_repel(data= subset(combined_df, qvalue < 0.05), aes(EXPECTED, OBSERVED, label=gene), box.padding=0.1, point.padding=0.1, segment.color="gray50", size=3.5)
+
+
+g <- ggplot_gtable(ggplot_build(p))
+strip_both <- which(grepl('strip-', g$layout$name))
+fills <- c("#e78ac3","#66c2a5","#e5c494","#80b1d3")
+k <- 1
+for (i in strip_both) {
+j <- which(grepl('rect', g$grobs[[i]]$grobs[[1]]$childrenOrder))
+g$grobs[[i]]$grobs[[1]]$children[[j]]$gp$fill <- fills[k]
+k <- k+1
+}
+
+pdf(file = paste0(output_dir, "/QQPlot.Covariates.pdf"),width=11.5, height=3.8)
+grid.draw(g)
+dev.off()
+
+```

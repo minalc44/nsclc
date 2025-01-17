@@ -1,0 +1,190 @@
+---
+title: "Cosmic Mutation Spectrum"
+author: ""Vaibhavi Pathak, Minal Caliskan""
+date: "02/23/2024"
+output: html_document
+---
+
+```{r, Setup, include=FALSE}
+# Load libraries
+library(dplyr)
+library(ggplot2)
+library(wesanderson)
+library(viridis)
+library(RColorBrewer)
+library(writexl)
+library(readxl)
+library(tidyr)
+library(stringr)
+library(tools)
+library(data.table)
+library(ontologyIndex)
+library(stringi)
+
+# Define paths
+base_dir <- "[PATH_TO_DATA]" #replace this with the data location
+input_dir <- file.path(base_dir,"inputfiles")
+output_dir <- file.path(base_dir,"outputfiles")
+
+```
+
+
+```{Genome-wide Mutation Spectrum, include=FALSE}
+#Genome-wide Mutation Spectrum
+ngenomic <- fread(file.path(output_dir, "NSCLC.Genomic.Clean.txt.gz"), data.table=FALSE)
+mutation_counts <- ngenomic %>%
+  filter(!is.na(GENOMIC_MUTATION_ID) & GENOMIC_MUTATION_ID != "") %>%
+  group_by(INDIVIDUAL_ID) %>%
+  summarise(n_mutations = n_distinct(GENOMIC_MUTATION_ID)) %>%
+  right_join(data.frame(INDIVIDUAL_ID = unique(ngenomic$INDIVIDUAL_ID)), by="INDIVIDUAL_ID") %>%
+  mutate(n_mutations = replace_na(n_mutations,0))
+
+
+# Histogram of Number of Genome-wide Somatic Mutations Per Subject
+ggplot() +
+  geom_histogram(aes(x=mutation_counts$n_mutations), fill = "#b58900", color = "#586e75", width=0.4, size=0.2) + 
+  ylab("Number of Subjects") +
+  xlab("Number of Variants") +
+  theme_classic() +
+  theme(legend.position = "none", legend.title = element_blank(), axis.text = element_text(size=8), 
+        axis.title = element_text(size=12),
+        axis.line = element_line(colour= "darkgray", size=0),
+        panel.border=element_rect(colour= "darkgray", fill=NA, size=0.3),
+        legend.key.height = unit(0.2, 'cm'), legend.key.width = unit (0.4, 'cm'),
+        plot.title = element_text(size=10, face="bold",hjust=0.5)) +
+  geom_vline(xintercept = median(mutation_counts$n_mutations), linetype="dotted", color="black", size=1)
+ggsave(file.path(output_dir,"GenomeWide.MutationSpectrum.pdf"), height=2.6, width = 3.4, pointsize=12, dpi=600)
+
+
+# Genome-wide Somatic Mutations Pie Chart
+gen.var <- data.frame(N=c("0",paste0(intToUtf8(8805),"1")), value=c(length(which(mutation_counts$n_mutations==0))/nrow(mutation_counts)*100, length(which(mutation_counts$n_mutations>0))/nrow(mutation_counts)*100))
+
+ggplot(gen.var, aes(x="", y=value, fill=N)) + 
+    geom_bar(width=1, stat="identity") + 
+    coord_polar("y",start=0) +
+    theme_void() +
+    #theme(legend.position="none") +
+    geom_text(aes(label = paste0(round(value, digits=1),"%")), position = position_stack(vjust=0.5), size=6) +
+    scale_fill_manual(values=(c("#b58900","#e8dbb2"))) +
+    guides(fill=guide_legend(title="")) + 
+    theme(legend.text=element_text(size=rel(1.5)), legend.key.size = unit(0.8, 'cm'), legend.key.height = unit(0.5, 'cm'), legend.key.width = unit(0.7, 'cm'),legend.title=element_text(size=14))
+ggsave(file.path(output_dir,"GenomeWide.MutationPieChart.pdf"), height=2.6, width = 3.1, pointsize=12, dpi=600)
+
+
+# Genome-wide Top 30 Genes
+genome.top30 <- ngenomic %>% 
+  distinct(GENE_SYMBOL, INDIVIDUAL_ID) %>% 
+  count(GENE_SYMBOL, sort=TRUE) %>% 
+  slice_head (n=30)
+genome.top30$GENE_SYMBOL <- factor(genome.top30$GENE_SYMBOL, level=unique(genome.top30$GENE_SYMBOL)) 
+
+ggplot(genome.top30, aes(x=GENE_SYMBOL, y=n)) +
+  geom_bar(stat = "identity", width=0.5, fill = "#d2b866") + 
+  ylab("Number of Subjects") +
+  xlab("") +
+  theme_classic() +
+  theme(legend.position = "none", legend.title = element_blank(), axis.text = element_text(size=8), 
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+        axis.title = element_text(size=10), axis.text.y = element_text(color="black"),
+        axis.line = element_line(colour= "darkgray", size=0),
+        panel.border=element_rect(colour= "darkgray", fill=NA, size=0.3),
+        legend.key.height = unit(0.2, 'cm'), legend.key.width = unit (0.4, 'cm'),
+        plot.title = element_text(size=10, face="bold",hjust=0.5))
+
+ggsave(file.path(output_dir,"GenomeWide.Top30Genes.pdf"), height=2.3, width = 7.7, pointsize=12, dpi=600)
+
+```
+
+
+```{CGC CMC Cancer Relevant Mutation Spectrum, include=FALSE}
+# CGC CMC Cancer Relevant Mutation Spectrum
+ncancer <- fread (file.path(output_dir,"NSCLC.CGCCMC.txt.gz"))
+mutation_counts <- ncancer %>%
+  filter(!is.na(GENOMIC_MUTATION_ID) & GENOMIC_MUTATION_ID != "") %>%
+  group_by(INDIVIDUAL_ID) %>%
+  summarise(n_mutations = n_distinct(GENOMIC_MUTATION_ID)) %>%
+  right_join(data.frame(INDIVIDUAL_ID = unique(ngenomic$INDIVIDUAL_ID)), by="INDIVIDUAL_ID") %>%
+  mutate(n_mutations = replace_na(n_mutations,0))
+
+# Histogram of Number of Cancer Relevant Somatic Mutations Per Subject
+ggplot() +
+  geom_histogram(aes(x=mutation_counts$n_mutations), fill = "#2ba198", color = "#586e75", width=0.4, size=0.2) + 
+  ylab("Number of Subjects") +
+  xlab("Number of Variants") +
+  theme_classic() +
+  theme(legend.position = "none", legend.title = element_blank(), axis.text = element_text(size=8), 
+        axis.title = element_text(size=12),
+        axis.line = element_line(colour= "darkgray", size=0),
+        panel.border=element_rect(colour= "darkgray", fill=NA, size=0.3),
+        legend.key.height = unit(0.2, 'cm'), legend.key.width = unit (0.4, 'cm'),
+        plot.title = element_text(size=12, face="bold",hjust=0.5)) +
+  geom_vline(xintercept = median(mutation_counts$n_mutations), linetype="dotted", color="black", size=1)
+ggsave(file.path(output_dir,"CGCCMC.MutationSpectrum.pdf"), height=2.6, width = 3.4, pointsize=12, dpi=600)
+
+
+# CGC CMC Cancer Relevant Somatic Mutations Pie Chart
+can.var <- data.frame(N=c("0",paste0(intToUtf8(8805),"1")), value=c(length(which(mutation_counts$n_mutations==0))/nrow(mutation_counts)*100, length(which(mutation_counts$n_mutations>0))/nrow(mutation_counts)*100))
+
+ggplot(can.var, aes(x="", y=value, fill=N)) + 
+    geom_bar(width=1, stat="identity") + 
+    coord_polar("y",start=0) +
+    theme_void() +
+    #theme(legend.position="none") +
+    geom_text(aes(label = paste0(round(value, digits=1),"%")), position = position_stack(vjust=0.5), size=6) +
+    scale_fill_manual(values=(c("#2ba198","#bfe2e0"))) +
+    guides(fill=guide_legend(title="")) + 
+    theme(legend.text=element_text(size=rel(1.5)), legend.key.size = unit(0.8, 'cm'), legend.key.height = unit(0.5, 'cm'), legend.key.width = unit(0.7, 'cm'),legend.title=element_text(size=14))
+ggsave(file.path(output_dir,"CGCCMC.MutationPieChart.pdf"), height=2.6, width = 3.1, pointsize=12, dpi=600)
+
+
+# CGC CMC Cancer Relevant Top 30 Genes
+cancer.top30 <- ncancer %>% 
+  distinct(GENE_SYMBOL, INDIVIDUAL_ID) %>% 
+  count(GENE_SYMBOL, sort=TRUE) %>% 
+  slice_head (n=30)
+cancer.top30$GENE_SYMBOL <- factor(cancer.top30$GENE_SYMBOL, level=unique(cancer.top30$GENE_SYMBOL)) 
+
+ggplot(cancer.top30, aes(x=GENE_SYMBOL, y=n)) +
+  geom_bar(stat = "identity", width=0.5, fill = "#7fc6c1") + 
+  ylab("Number of Subjects") +
+  xlab("") +
+  theme_classic() +
+  theme(legend.position = "none", legend.title = element_blank(), axis.text = element_text(size=8), 
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+        axis.title = element_text(size=10), axis.text.y = element_text(color="black"),
+        axis.line = element_line(colour= "darkgray", size=0),
+        panel.border=element_rect(colour= "darkgray", fill=NA, size=0.3),
+        legend.key.height = unit(0.2, 'cm'), legend.key.width = unit (0.4, 'cm'),
+        plot.title = element_text(size=10, face="bold",hjust=0.5))
+ggsave(file.path(output_dir,"CGCCMC.Top30Genes.pdf"), height=2.3, width = 7.7, pointsize=12, dpi=600)
+
+
+# CGC CMC Cancer Relevant Top 30 Mutations
+cancer.top30mut <- ncancer %>% 
+  distinct(GENOMIC_MUTATION_ID, INDIVIDUAL_ID) %>% 
+  count(GENOMIC_MUTATION_ID, sort=TRUE) %>% 
+  slice_head (n=30)
+
+# CGC CMC Cancer Relevant Top 30 Actionability
+actionability <- read.delim(file.path(output_dir,"Actionability.Annotation.txt"))
+cancer.top30mut <- left_join(actionability, cancer.top30mut) %>% mutate (NEWANNOT = paste(GENE_SYMBOL, MUTATION_AA, sep="_"))
+cancer.top30mut$NEWANNOT <- factor(cancer.top30mut$NEWANNOT, level=unique(cancer.top30mut$NEWANNOT)) 
+
+ggplot(cancer.top30mut, aes(x=NEWANNOT, y=n, fill=ACTIONABILITY)) +
+  geom_bar(stat = "identity", width=0.5) + 
+  ylab("Number of Subjects") +
+  xlab("") +
+  theme_classic() +
+  scale_fill_manual(values=c("#586e75","#d33682")) + 
+  theme(axis.text = element_text(size=8), 
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+        axis.title = element_text(size=10), axis.text.y = element_text(color="black"),
+        axis.line = element_line(colour= "darkgray", size=0),
+        panel.border=element_rect(colour= "darkgray", fill=NA, size=0.3),
+        legend.key.height = unit(0.2, 'cm'), legend.key.width = unit (0.4, 'cm'),
+        plot.title = element_text(size=10, face="bold",hjust=0.5)) +
+  theme(legend.title = element_text(size=8), legend.text = element_text(size=8), legend.position = "inside", legend.position.inside=c(0.95,0.77), legend.key.width=unit(0.5,"cm"),legend.key.height = unit(0.3,"cm"), legend.box.background = element_rect(colour="darkgray"))
+  
+ggsave(file.path(output_dir,"CGCCMC.Top30Mutations.pdf"), height=2.6, width = 7.7, pointsize=12, dpi=600)
+
+```

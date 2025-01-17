@@ -1,0 +1,350 @@
+---
+title: "COSMIC DriverGene"
+author: "Minal Caliskan, Vaibhavi Pathak"
+date: "03/04/2024"
+output: html_document
+---
+
+```{r, Setup, include=FALSE}
+# Load libraries
+library(dplyr)
+library(ggplot2)
+library(wesanderson)
+library(viridis)
+library(RColorBrewer)
+library(writexl)
+library(readxl)
+library(tidyr)
+library(stringr)
+library(tools)
+library(data.table)
+library(ontologyIndex)
+library(DEGreport)
+library(stringi)
+library(dndscv)
+library(maftools)
+library(tidyverse)
+
+# Define paths
+base_dir <- "[PATH_TO_DATA]" #replace this with the data location
+input_dir <- file.path(base_dir,"inputfiles")
+output_dir <- file.path(base_dir,"outputfiles")
+
+```
+
+
+```{r, Create MAF file Mutation Annotation Format, include=FALSE}
+# Create MAF file Mutation Annotation Format
+gvcf <- fread(file.path(input_dir,"Cosmic_GenomeScreensMutant_Normal_v98_GRCh38.vcf.gz"), sep="\t", header=TRUE, skip="#CHROM")
+ngenomic <- fread(file.path(output_dir, "NSCLC.Genomic.Clean.txt.gz"), data.table=FALSE)
+priority_df <- fread(file.path(input_dir,"MutationEffectPriority.txt"), data.table=FALSE)
+
+# Parse COSMIC vcf file
+nvcf <- gvcf %>% dplyr::rename(GENOMIC_MUTATION_ID = ID) %>%
+  mutate(SO_TERM = str_split(INFO, "SO_TERM=", simplify = T)[,2]) %>% 
+  mutate(SO_TERM = str_split(SO_TERM, ";", simplify = T)[,1]) %>%
+  mutate(GENE_SYMBOL = str_split(INFO, "GENE=", simplify = T)[,2]) %>% 
+  mutate(GENE_SYMBOL = str_split(GENE_SYMBOL, ";", simplify = T)[,1]) %>% 
+  mutate(TRANSCRIPT_ACCESSION = str_split(INFO, "TRANSCRIPT=", simplify = T)[,2]) %>% 
+  mutate(TRANSCRIPT_ACCESSION = str_split(TRANSCRIPT_ACCESSION, ";", simplify = T)[,1]) %>% 
+  mutate(IS_CANONICAL = str_split(INFO, "IS_CANONICAL=", simplify = T)[,2]) %>% 
+  mutate(IS_CANONICAL = str_split(IS_CANONICAL, ";", simplify = T)[,1]) %>%
+  #COSV65772557 has multiple SO_TERM annotations - include as SNV only; genome_stop-genome_Start=0
+  filter(!(GENOMIC_MUTATION_ID == "COSV65772557" & SO_TERM == "substitution")) %>%
+  #MAF file requires Variant Types of SNP, DEL, INS, TNP, DNP, ONP
+  inner_join(ngenomic %>% filter(!is.na(GENOMIC_MUTATION_ID) & GENOMIC_MUTATION_ID != "") %>% select (GENOMIC_MUTATION_ID, MUTATION_DESCRIPTION, MUTATION_AA, GENOMIC_WT_ALLELE, GENOMIC_MUT_ALLELE, GENOME_STOP, GENOME_START, TRANSCRIPT_ACCESSION, GENE_SYMBOL) %>% distinct(), by= c("GENOMIC_MUTATION_ID", "TRANSCRIPT_ACCESSION", "GENE_SYMBOL")) %>%
+  mutate(SO_TERM = case_when(
+    SO_TERM == "SNV" & str_length(GENOMIC_WT_ALLELE) - str_length(GENOMIC_MUT_ALLELE) == 0 ~ "SNP",
+    SO_TERM == "substitution" & GENOME_STOP - GENOME_START == 0 ~ "SNP",
+    SO_TERM == "substitution" & GENOME_STOP - GENOME_START == 1 ~ "DNP",
+    SO_TERM == "substitution" & GENOME_STOP - GENOME_START == 2 ~ "TNP",
+    SO_TERM == "substitution" & GENOME_STOP - GENOME_START  > 2 ~ "ONP",
+    SO_TERM == "insertion" ~ "INS",    
+    SO_TERM == "deletion" ~ "DEL",    
+    SO_TERM == "indel" & str_length(GENOMIC_WT_ALLELE) - str_length(GENOMIC_MUT_ALLELE) > 0 ~ "DEL",
+    SO_TERM == "indel" & str_length(GENOMIC_WT_ALLELE) - str_length(GENOMIC_MUT_ALLELE) < 0 ~ "INS",
+    SO_TERM == "indel" & str_length(GENOMIC_WT_ALLELE) - str_length(GENOMIC_MUT_ALLELE) > 0 ~ "SNP")) %>% 
+  #Add Missing VEP annotations
+  mutate(NEWMUTATIONAA = stri_sub(MUTATION_AA, -1, -1)) %>% 
+  mutate(MUTATION_DESCRIPTION = case_when(MUTATION_DESCRIPTION == "" & SO_TERM %in% c("INS", "DEL") & grepl("fs*",MUTATION_AA) ~ "frameshift_variant", 
+                                          MUTATION_DESCRIPTION == "" & SO_TERM %in% c("INS", "DEL") & !grepl("fs*",MUTATION_AA) & NEWMUTATIONAA == "*" ~ "stop_gained",
+                                          TRUE ~ as.character(MUTATION_DESCRIPTION))) %>% 
+  mutate(INFRAME = abs(str_length(GENOMIC_WT_ALLELE) - str_length(GENOMIC_MUT_ALLELE))) %>%
+  mutate(MUTATION_DESCRIPTION = case_when(MUTATION_DESCRIPTION == "" & SO_TERM == "INS" & INFRAME%%3 == 0 ~ "inframe_insertion",
+                                          MUTATION_DESCRIPTION == "" & SO_TERM == "DEL" & INFRAME%%3 == 0 ~ "inframe_deletion", 
+                                          TRUE ~ as.character(MUTATION_DESCRIPTION))) 
+
+# Map each variant to only one of all possible gene transcripts/isoforms following the vcf2maf rules
+nvcf_maf <- nvcf %>% 
+  group_by(GENOMIC_MUTATION_ID) %>% 
+  #If canonical transcript exist, keep only canonical transcripts
+  filter(if(any(IS_CANONICAL == "y")) IS_CANONICAL == "y" else TRUE) %>% 
+  #Prioritize based on variant effect priorities
+  mutate(
+    desc_list = map(MUTATION_DESCRIPTION, function (desc) {
+      if(desc == "") return(NA_character_)
+      if(grepl(",", desc)) {
+        trimws(strsplit(desc, ",") [[1]])
+      } else {
+        trimws(desc)
+      }
+    }),
+    priorities = map(desc_list, function(descs) {
+      if(length(descs) == 1 && is.na(descs)) return(NA_real_)
+      priority_df$Priority[match(descs, priority_df$VEP)]
+  }),
+  min_priority_index = map_int(priorities, function(p) {
+    if(length(p) == 1 && is.na(p)) return(1)
+    which.min(p)
+  }),
+  selected_description = map2_chr(desc_list, min_priority_index, function(descs,idx) {
+    if(length(descs) == 1 && is.na(descs)) return("")
+    descs[idx]
+    }),
+  min_priority = map_dbl(priorities, function(p) {
+    if(length(p) == 1 && is.na(p)) return(Inf)
+    min(p)
+  })
+) %>%
+  filter(min_priority == min(min_priority)) %>%
+  arrange(GENOMIC_MUTATION_ID) %>%
+  slice(1) %>%
+  mutate(Mutation_Description = selected_description) %>%
+  select (-desc_list, -priorities, -min_priority_index, -selected_description, -min_priority) %>%
+  ungroup()
+
+# Convert VEP Mutation Descriptions to MAF Mutation Descriptions
+ngenomic_maf_format <- ngenomic %>% 
+  filter(!is.na(GENOMIC_MUTATION_ID) & GENOMIC_MUTATION_ID != "") %>% 
+  select(GENOMIC_MUTATION_ID, COSMIC_SAMPLE_ID, INDIVIDUAL_ID) %>% 
+  distinct() %>%
+  left_join(nvcf_maf %>% select(GENE_SYMBOL, '#CHROM', GENOME_START, GENOME_STOP, GENOMIC_WT_ALLELE, GENOMIC_MUT_ALLELE, Mutation_Description, SO_TERM,  MUTATION_AA, GENOMIC_MUTATION_ID), by="GENOMIC_MUTATION_ID") %>%
+  left_join(priority_df %>% select(VEPtoMAF, VEP), by = c("Mutation_Description" = "VEP")) %>% 
+  mutate(VEPtoMAF = case_when(VEPtoMAF == "Frame_Shift_Del; Frame_Shift_Ins" & SO_TERM == "INS" ~ "Frame_Shift_Ins",
+                              VEPtoMAF == "Frame_Shift_Del; Frame_Shift_Ins" & SO_TERM == "DEL"  ~ "Frame_Shift_Del", 
+                              TRUE ~ as.character(VEPtoMAF))) %>% 
+  select("Hugo_Symbol" = GENE_SYMBOL,
+  "Chromosome" = '#CHROM', 
+  "Start_Position"= GENOME_START, 
+  "End_Position"= GENOME_STOP, 
+  "Reference_Allele" = GENOMIC_WT_ALLELE, 
+  "Tumor_Seq_Allele2" = GENOMIC_MUT_ALLELE, 
+  "Variant_Classification" = VEPtoMAF, 
+  "Variant_Type"= SO_TERM, 
+  "Tumor_Sample_Barcode"= COSMIC_SAMPLE_ID, 
+  "Protein_Change"= MUTATION_AA, 
+  "GENOMIC_MUTATION_ID"= GENOMIC_MUTATION_ID , 
+  "INDIVIDUAL_ID" = INDIVIDUAL_ID) %>%
+  #Oncoclust can't parse "=" at the end of the strings
+  mutate(Protein_Change = sub("=$", "", Protein_Change))
+
+#write.table(ngenomic_maf_format, file.path(output_dir,"NSCLC.MAF.txt"), sep="\t",quote=FALSE,row.names=FALSE)
+  
+```
+
+
+```{r, dndscv, include=FALSE}
+# NSCLC, LAD, SCC datasets
+nmafdata <- fread(file.path(output_dir,"NSCLC.MAF.txt"), data.table = FALSE)
+ngenomic <- fread(file.path(output_dir, "NSCLC.Genomic.Clean.txt.gz"), data.table = FALSE)
+lmafdata <- nmafdata %>% filter (INDIVIDUAL_ID %in% (ngenomic %>% filter (EFO == "EFO:0000571") %>% pull(INDIVIDUAL_ID)))
+write.table(lmafdata, file.path(output_dir,"LAD.MAF.txt"), sep="\t",quote=FALSE,row.names=FALSE)
+smafdata <- nmafdata %>% filter (INDIVIDUAL_ID %in% (ngenomic %>% filter (EFO == "EFO:0000708") %>% pull(INDIVIDUAL_ID)))
+write.table(smafdata, file.path(output_dir,"SCC.MAF.txt"), sep="\t",quote=FALSE,row.names=FALSE)
+
+# Run dNdScv NSCLC
+# RefCDS and Covariate files for GRCh38/hg38  are downloaded from: https://github.com/im3sanger/dndscv_data/tree/master/data
+load(file.path(input_dir,"covariates_hg19_hg38_epigenome_pcawg.rda"))
+nsclc_dndscv <- nmafdata %>% select(INDIVIDUAL_ID, Chromosome, Start_Position, Reference_Allele, Tumor_Seq_Allele2) 
+dndsout = dndscv(nsclc_dndscv, refdb = file.path(input_dir,"RefCDS_human_GRCh38_GencodeV18_recommended.rda"), cv = covs, max_muts_per_gene_per_sample = Inf, max_coding_muts_per_sample = 1000)
+sel_cv = dndsout$sel_cv
+write.table(sel_cv, file.path(output_dir,"NSCLC.dndscv.txt"), sep = "\t", quote = F, row.names = F)
+
+# Run dNdScv LAD
+lad_dndscv <- lmafdata %>% select(INDIVIDUAL_ID, Chromosome, Start_Position, Reference_Allele, Tumor_Seq_Allele2) 
+dndsout = dndscv(lad_dndscv, refdb = file.path(input_dir,"RefCDS_human_GRCh38_GencodeV18_recommended.rda"), cv = covs, max_muts_per_gene_per_sample = Inf, max_coding_muts_per_sample = 1000)
+sel_cv = dndsout$sel_cv
+write.table(sel_cv, file.path(output_dir,"LAD.dndscv.txt"), sep = "\t", quote = F, row.names = F)
+
+# Run dNdScv SCC
+scc_dndscv <- smafdata %>% select(INDIVIDUAL_ID, Chromosome, Start_Position, Reference_Allele, Tumor_Seq_Allele2) 
+dndsout = dndscv(scc_dndscv, refdb = file.path(input_dir,"RefCDS_human_GRCh38_GencodeV18_recommended.rda"), cv = covs, max_muts_per_gene_per_sample = Inf, max_coding_muts_per_sample = 1000)
+sel_cv = dndsout$sel_cv
+write.table(sel_cv, file.path(output_dir,"SCC.dndscv.txt"), sep = "\t", quote = F, row.names = F)
+
+```
+
+
+```{r, OncodriveClust, include=FALSE}
+# Run OncodriveClust NSCLC
+nsclc_maf <- maftools::read.maf(maf=file.path(output_dir,"NSCLC.MAF.txt"))
+oncoout <- maftools::oncodrive(maf = nsclc_maf, AACol="Protein_Change", minMut = 5, nBgGenes = 100)
+write.table(oncoout, file.path(output_dir,"NSCLC.oncodriveclust.txt"), sep="\t",quote=FALSE, row.names=FALSE)
+
+# Run OncodriveClust LAD
+lad_maf <- maftools::read.maf(maf=file.path(output_dir,"LAD.MAF.txt"))
+oncoout <- maftools::oncodrive(maf = lad_maf, AACol="Protein_Change", minMut = 5, nBgGenes = 100)
+write.table(oncoout, file.path(output_dir,"LAD.oncodriveclust.txt"), sep="\t",quote=FALSE, row.names=FALSE)
+
+# Run OncodriveClust SCC
+scc_maf <- maftools::read.maf(maf=file.path(output_dir,"SCC.MAF.txt"))
+oncoout <- maftools::oncodrive(maf = scc_maf, AACol="Protein_Change", minMut = 5, nBgGenes = 100)
+write.table(oncoout, file.path(output_dir,"SCC.oncodriveclust.txt"), sep="\t",quote=FALSE, row.names=FALSE)
+
+```
+
+
+```{r, Significant Genes, include=FALSE}
+# FLAG genes: Top 100 frequently mutated genes independent of pathogenicity
+# Table downloaded from: https://pubmed.ncbi.nlm.nih.gov/25466818/
+top100flags <- read.delim(file.path(input_dir,"12920_2014_64_MOESM4_ESM.txt"))
+top100flags <- top100flags %>% select (FLAGS) %>% filter(!FLAGS == "")
+
+# Exclude FLAG genes and re-calculate FDR - dNdScv NSCLC
+nsclc_dn <- read.delim(file.path(output_dir,"NSCLC.dndscv.txt"))
+nsclc_dn <- nsclc_dn %>% filter(!gene_name %in% top100flags$FLAGS) 
+nsclc_dn <- nsclc_dn %>% mutate (qnew = p.adjust(pglobal_cv, method="BH", n=nrow(nsclc_dn)))
+nsclc_dn_sig <- nsclc_dn %>% filter (qnew <0.05) %>% 
+  mutate(gene_name = case_when (
+    gene_name == "CDKN2A.p14arf" ~ "CDKN2A", 
+    gene_name == "CDKN2A.p16INK4a" ~ "CDKN2A",
+    gene_name == "STYXL2" ~ "DUSP27",
+    TRUE ~ gene_name)) %>% select(gene_name) %>% 
+  rename("GENE_NAME" = "gene_name") %>% 
+  mutate (Source = "dNdScv.NSCLC") %>% 
+  mutate (Analysis = "dNdS") %>% 
+  mutate (Disease = "NSCLC") %>%
+  distinct()
+    
+# Exclude FLAG genes and re-calculate FDR - dNdScv LAD
+lad_dn <- read.delim(file.path(output_dir,"LAD.dndscv.txt"))
+lad_dn <- lad_dn %>% filter(!gene_name %in% top100flags$FLAGS) 
+lad_dn <- lad_dn %>% mutate (qnew = p.adjust(pglobal_cv, method="BH", n=nrow(lad_dn)))
+lad_dn_sig <- lad_dn %>% filter (qnew <0.05) %>% 
+  mutate(gene_name = case_when (
+    gene_name == "CDKN2A.p14arf" ~ "CDKN2A", 
+    gene_name == "CDKN2A.p16INK4a" ~ "CDKN2A",
+    gene_name == "STYXL2" ~ "DUSP27",
+    TRUE ~ gene_name)) %>% select(gene_name) %>% 
+  rename("GENE_NAME" = "gene_name") %>% 
+  mutate (Source = "dNdScv.LAD") %>% 
+  mutate (Analysis = "dNdS") %>% 
+  mutate (Disease = "LAD")  %>%
+  distinct()
+
+# Exclude FLAG genes and re-calculate FDR - dNdScv SCC
+scc_dn <- read.delim(file.path(output_dir,"SCC.dndscv.txt"))
+scc_dn <- scc_dn %>% filter(!gene_name %in% top100flags$FLAGS) 
+scc_dn <- scc_dn %>% mutate (qnew = p.adjust(pglobal_cv, method="BH", n=nrow(scc_dn)))
+scc_dn_sig <- scc_dn %>% filter (qnew <0.05) %>% 
+  mutate(gene_name = case_when (
+    gene_name == "CDKN2A.p14arf" ~ "CDKN2A", 
+    gene_name == "CDKN2A.p16INK4a" ~ "CDKN2A",
+    gene_name == "STYXL2" ~ "DUSP27",
+    TRUE ~ gene_name)) %>% select(gene_name) %>% 
+  rename("GENE_NAME" = "gene_name") %>% 
+  mutate (Source = "dNdScv.SCC") %>% 
+  mutate (Analysis = "dNdS") %>% 
+  mutate (Disease = "SCC")  %>%
+  distinct()
+
+# Exclude FLAG genes and re-calculate FDR - OncodriveClust NSCLC
+nsclc_on <- read.delim(file.path(output_dir,"NSCLC.oncodriveclust.txt"))
+nsclc_on <- nsclc_on %>% filter(!Hugo_Symbol %in% top100flags$FLAGS) 
+nsclc_on <- nsclc_on %>% mutate (qnew = p.adjust(pval, method="BH", n=nrow(nsclc_on)))
+nsclc_on_sig <- nsclc_on %>% filter (qnew <0.05) %>% select(Hugo_Symbol) %>% 
+  rename("GENE_NAME" = "Hugo_Symbol") %>% 
+  mutate (Source = "OncodriveCLUST.NSCLC") %>% 
+  mutate (Analysis = "OdC") %>% 
+  mutate (Disease = "NSCLC")  %>%
+  distinct()
+
+# Exclude FLAG genes and re-calculate FDR - OncodriveClust LAD
+lad_on <- read.delim(file.path(output_dir,"LAD.oncodriveclust.txt"))
+lad_on <- lad_on %>% filter(!Hugo_Symbol %in% top100flags$FLAGS) 
+lad_on <- lad_on %>% mutate (qnew = p.adjust(pval, method="BH", n=nrow(lad_on)))
+lad_on_sig <- lad_on %>% filter (qnew <0.05) %>% select(Hugo_Symbol) %>% 
+  rename("GENE_NAME" = "Hugo_Symbol") %>% 
+  mutate (Source = "OncodriveCLUST.LAD") %>% 
+  mutate (Analysis = "OdC") %>% 
+  mutate (Disease = "LAD")  %>%
+  distinct()
+
+# Exclude FLAG genes and re-calculate FDR - OncodriveClust SCC
+scc_on <- read.delim(file.path(output_dir,"SCC.oncodriveclust.txt"))
+scc_on <- scc_on %>% filter(!Hugo_Symbol %in% top100flags$FLAGS) 
+scc_on <- scc_on %>% mutate (qnew = p.adjust(pval, method="BH", n=nrow(scc_on)))
+scc_on_sig <- scc_on %>% filter (qnew <0.05) %>% select(Hugo_Symbol) %>% 
+  rename("GENE_NAME" = "Hugo_Symbol") %>% 
+  mutate (Source = "OncodriveCLUST.SCC") %>% 
+  mutate (Analysis = "OdC") %>% 
+  mutate (Disease = "SCC")  %>%
+  distinct()
+
+# Bar plot of Number of Significant Genes
+combined_sig <- bind_rows(nsclc_dn_sig, lad_dn_sig, scc_dn_sig, nsclc_on_sig, lad_on_sig, scc_on_sig)
+gene_counts <- combined_sig %>% group_by(Source, Analysis, Disease) %>% summarise(gcount = n_distinct(GENE_NAME)) %>% bind_rows(data.frame(Source="OncodriveCLUST.SCC", Analysis="OdC", Disease="SCC", gcount=0)) %>% mutate(Disease = factor(Disease, levels = c("NSCLC", "LAD", "SCC")))
+
+ggplot(gene_counts, aes(Analysis, gcount)) + 
+  geom_bar(stat="identity", width = 0.6, fill="#A15C2B") + 
+  theme_classic() + 
+  xlab("") + ylab("Number of Significant Genes") + 
+  facet_grid(.~Disease) +
+  theme(axis.text = element_text(size=8, face="bold"),axis.line = element_line(colour = "darkgray", size=0.3), panel.border = element_rect(colour = "darkgray", fill=NA, size=0.3), strip.background = element_rect(size=0.5)) 
+ggsave(file.path(output_dir,"SigGenes.Barplot.pdf"), width=3.4, height=2.9, units="in", pointsize=12, dpi = 600)
+
+```
+
+
+```{r, Overlap with CGC Genes, include=FALSE}
+# CGC Driver Genes
+cmc <- fread(file.path(input_dir,"CancerMutationCensus_AllData_v98_GRCh38.tsv.gz"), data.table = FALSE)
+cgc <- cmc %>% filter (CGC_TIER %in% c(1,2)) %>% select(GENE_NAME) %>% distinct()
+cgc_overlap <- cgc %>% filter(GENE_NAME %in% combined_sig$GENE_NAME) %>% mutate(Source="CGC") %>% mutate(Analysis="CGC")
+combined_sig_cgc <- bind_rows(combined_sig, cgc_overlap)
+
+# Overlap with CGC Genes
+gene_table <- expand.grid(
+  GENE_NAME = unique(combined_sig_cgc$GENE_NAME),
+  Source = c(gene_counts$Source, "CGC")) %>%
+  left_join(combined_sig_cgc, by=c("GENE_NAME","Source")) %>% 
+  mutate(YESNO = case_when(is.na(Analysis) ~ "NO",
+                           !is.na(Analysis) ~ Source))
+
+# Heatmap - Known CGC Genes
+gene_table1 <- gene_table %>% filter(GENE_NAME %in% cgc_overlap$GENE_NAME) %>%
+  mutate(Source = factor(Source, levels=c("CGC", "dNdScv.NSCLC", "OncodriveCLUST.NSCLC", "dNdScv.LAD", "OncodriveCLUST.LAD", "dNdScv.SCC", "OncodriveCLUST.SCC"))) %>%
+  mutate(YESNO = factor(YESNO, levels=c("CGC", "dNdScv.NSCLC", "OncodriveCLUST.NSCLC", "dNdScv.LAD", "OncodriveCLUST.LAD", "dNdScv.SCC", "OncodriveCLUST.SCC", "NO")))
+
+ggplot(gene_table1, aes(Source, GENE_NAME,  col=YESNO)) + 
+  geom_tile(color = "lightgray", fill="white") +
+  geom_point(size=5, shape=15)+
+  theme_classic() + 
+  xlab("") + ylab("") +
+  scale_color_manual(values=c("#2AA198","#A15C2B", "#A15C2B","#A15C2B","#A15C2B", "#A15C2B","white")) +
+  theme(axis.text = element_text(size=10, face="bold"), axis.title=element_text(size=10),
+        axis.line = element_line(colour = "darkgray", size=0.3), panel.border = element_rect(colour = "darkgray", fill=NA, size=0.3), legend.text = element_text(size=8)) + 
+          theme(legend.position = "none", legend.title = element_blank(), legend.key.width = unit(0.4, "cm"), legend.spacing.x =  unit (0.2, "cm"), legend.key.height = unit(0.3, "cm")) + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) + 
+  scale_x_discrete(labels = c("CGC", "dNdS\nNSCLC", "OdC\nNSCLC", "dNdS\nLAD", "OdC\nLAD", "dNdS\nSCC", "OdC\nSCC"))
+ggsave(file.path(output_dir,"CGCGenes.Heatmap.pdf"), width=5, height=9, units="in", pointsize=12, dpi = 600)
+
+
+# Heatmap - Putative Genes
+gene_table2 <- gene_table %>% filter(!GENE_NAME %in% cgc_overlap$GENE_NAME) %>%
+  mutate(Source = factor(Source, levels=c("CGC", "dNdScv.NSCLC", "OncodriveCLUST.NSCLC", "dNdScv.LAD", "OncodriveCLUST.LAD", "dNdScv.SCC", "OncodriveCLUST.SCC"))) %>%
+  mutate(YESNO = factor(YESNO, levels=c("dNdScv.NSCLC", "OncodriveCLUST.NSCLC", "dNdScv.LAD", "OncodriveCLUST.LAD", "dNdScv.SCC", "OncodriveCLUST.SCC", "NO")))
+
+ggplot(gene_table2, aes(Source, GENE_NAME,  col=YESNO)) + 
+  geom_tile(color = "lightgray", fill="white") +
+  geom_point(size=5, shape=15)+
+  theme_classic() + 
+  xlab("") + ylab("") +
+  scale_color_manual(values=c("#A15C2B", "#A15C2B","#A15C2B","#A15C2B", "#A15C2B","white")) +
+  theme(axis.text = element_text(size=10, face="bold"), axis.title=element_text(size=10),
+        axis.line = element_line(colour = "darkgray", size=0.3), panel.border = element_rect(colour = "darkgray", fill=NA, size=0.3), legend.text = element_text(size=8)) + 
+          theme(legend.position = "none", legend.title = element_blank(), legend.key.width = unit(0.4, "cm"), legend.spacing.x =  unit (0.2, "cm"), legend.key.height = unit(0.3, "cm")) + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) + 
+  scale_x_discrete(labels = c("CGC", "dNdS\nNSCLC", "OdC\nNSCLC", "dNdS\nLAD", "OdC\nLAD", "dNdS\nSCC", "OdC\nSCC"))
+ggsave(file.path(output_dir,"PutativeGenes.Heatmap.pdf"), width=5, height=9, units="in", pointsize=12, dpi = 600)
+
+```
+

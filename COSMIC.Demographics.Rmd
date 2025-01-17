@@ -1,0 +1,444 @@
+---
+title: "COSMIC Demographics"
+author: "Minal Caliskan"
+date: "01/26/2024"
+output: html_document
+---
+
+```{r, Setup, include=FALSE}
+# Load libraries
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(wesanderson)
+library(viridis)
+library(RColorBrewer)
+library(readxl)
+library(tidyr)
+library(stringr)
+library(tools)
+library(data.table)
+library(ontologyIndex)
+library(cowplot)
+
+# Define paths
+base_dir <- "[PATH_TO_DATA]" #replace this with the data location
+input_dir <- file.path(base_dir,"inputfiles")
+output_dir <- file.path(base_dir,"outputfiles")
+
+```
+
+
+```{r, Data Sources, include=FALSE}
+# Data Sources
+# 1.COSMIC_v98 (https://cancer.sanger.ac.uk/cosmic; Not deposited due to license restrictions)
+#cgenomic <- fread(file.path(input_dir,"Cosmic_GenomeScreensMutant_v98_GRCh38.tsv.gz"), data.table=FALSE)
+cdisease <- fread(file.path(input_dir, "Cosmic_Classification_v98_GRCh38.tsv.gz"), data.table=FALSE)
+csample <- fread(file.path(input_dir,"Cosmic_Sample_v98_GRCh38.tsv.gz"), data.table=FALSE)
+cmutation <- fread(file.path(input_dir, "CancerMutationCensus_AllData_v98_GRCh38.tsv.gz"), data.table=FALSE)
+
+# 2.EFO (http://www.ebi.ac.uk/efo/efo.obo; Version used in analysis is deposited under input_dir)
+efo <- get_OBO(file.path(input_dir,"efo.obo"))
+
+# 3.Source Covariate Annotations (Age, Ethnicity, Smoking Status; Version used in analysis is deposited under input_dir)
+sannotations <- read.delim(file.path(input_dir,"Source_Covariate_Annotations.txt"))
+
+```
+
+
+```{r, EFO Disease, include=FALSE}
+# EFO Disease Annotations
+efo.name <- as.data.frame(cbind(efo$id, efo$name))
+colnames(efo.name) <- c("EFO", "EFO_NAME")
+efo_nsclc <- get_descendants(efo, "EFO:0003060")
+# Squamous Cell Lung Carcinoma ("EFO:0000708") should be included under NSCLC
+efo_nsclc<- c(efo_nsclc, "EFO:0000708")
+
+# Update COSMIC EFO Mapping
+# Add EFO ID for Acinar Lung Adenocarcinoma:COSO29915643 and Squamous Cell Lung Carcinoma :COSO100294830, COSO30034830, COSO30074830
+cdisease <- cdisease %>% 
+  mutate (EFO = case_when(
+    COSMIC_PHENOTYPE_ID == "COSO29915643" ~ "MONDO_0003892",
+    COSMIC_PHENOTYPE_ID == "COSO100294830" ~ "EFO_0000708",
+    COSMIC_PHENOTYPE_ID == "COSO30034830" ~ "EFO_0000708",
+    COSMIC_PHENOTYPE_ID == "COSO30074830" ~ "EFO_0000708",
+    TRUE ~ EFO )) %>% 
+    mutate (EFO = str_remove_all(EFO, "http://www.ebi.ac.uk/efo/|http://purl.obolibrary.org/obo/|http://www.orpha.net/ORDO/")) %>% 
+    mutate (EFO = str_replace_all(EFO, "_", ":"))
+
+# Add EFO Disease Name
+cdisease <- left_join(cdisease, efo.name)
+
+# NSCLC COSMIC Disease Annotations
+cnsclc <- cdisease %>% filter (EFO %in% efo_nsclc)
+
+# NSCLC Mutation Data
+ngenomic <- cgenomic %>% filter (COSMIC_PHENOTYPE_ID %in% cnsclc$COSMIC_PHENOTYPE_ID)
+#write.table(ngenomic, gzfile(file.path(output_dir,"NSCLC.Genomic.txt.gz")), row.names = FALSE, sep="\t",quote=FALSE)
+
+```
+
+
+```{r, Sample Level Exclusions, include=FALSE}
+# Exclude Cell Lines
+ngenomic <- fread(file.path(output_dir, "NSCLC.Genomic.txt.gz"), data.table=FALSE)
+ngenomic <- left_join(ngenomic, csample)
+ngenomic <- ngenomic %>% filter (!SAMPLE_TYPE == "cell-line")
+
+# Include Whole Genome and Whole Exome Screen
+ngenomic <- ngenomic %>% filter (WHOLE_GENOME_SCREEN == "y" | WHOLE_EXOME_SCREEN == "y")
+
+# Include One Sample per Individual
+selected.samples <- ngenomic %>%
+  group_by(INDIVIDUAL_ID) %>%
+  slice(if("primary" %in% TUMOUR_SOURCE)
+    min(which(TUMOUR_SOURCE == "primary"))
+    else 1) %>%
+  select(INDIVIDUAL_ID, COSMIC_SAMPLE_ID) %>%
+  ungroup()
+
+ngenomic <- ngenomic %>% filter (COSMIC_SAMPLE_ID %in% selected.samples$COSMIC_SAMPLE_ID)
+
+```
+
+
+```{r, Source Annotations, include=FALSE}
+# Source Annotations
+
+# Exclude mis-annotated Studies
+# PMID 28557978: mtDNA Sequencing only; PMID 29681454 cell line
+ngenomic <- ngenomic %>% filter (!PUBMED_PMID %in% c("28557978","29681454"))
+
+# Merge PMID and COSMIC_STUDY_ID
+ngenomic <- ngenomic %>% 
+  mutate (STUDY_NAME = case_when(
+    !is.na(PUBMED_PMID) ~ as.character(PUBMED_PMID),
+    COSMIC_STUDY_ID != "" ~ COSMIC_STUDY_ID,
+    TRUE ~ NA_character_
+  ))
+
+# Add Age, Ethnicity, Smoking Status, when available
+ngenomic <- left_join(ngenomic, sannotations)
+
+```
+
+
+```{r, Plot by Study ID, include=FALSE}
+# Plot by Study ID
+study_freq_order <- ngenomic %>% 
+  distinct(COSMIC_SAMPLE_ID, INDIVIDUAL_ID, STUDY_NAME, GENDER) %>% 
+  group_by(STUDY_NAME) %>%
+  count(STUDY_NAME, sort = TRUE)
+
+nsclc_bystudy <- ngenomic %>% 
+  distinct(COSMIC_SAMPLE_ID, INDIVIDUAL_ID, STUDY_NAME, GENDER) %>% 
+  group_by(STUDY_NAME, GENDER) %>%
+  count(STUDY_NAME, sort = TRUE) %>%
+  mutate(GENDER = case_when (GENDER == "f" ~ "Female", GENDER == "m" ~ "Male", GENDER == "u" ~ "Unknown"),
+  GENDER = factor(GENDER, levels = c("Female", "Male", "Unknown"))) %>%
+  mutate(STUDY_NAME = factor(STUDY_NAME, levels = rev(unique(study_freq_order$STUDY_NAME)))) %>%
+  as.data.frame() 
+
+ggplot(nsclc_bystudy, aes(x=STUDY_NAME, y=n, fill=GENDER)) +
+  geom_bar(stat = "identity", width=0.4) + 
+  ylab("Number of Individuals") +
+  xlab("Study ID") +
+  theme_classic() +
+  scale_fill_manual(values = c(Female="#e083b0",Male="#83dee0",Unknown="#e0b483")) +
+  theme(legend.title = element_blank(), axis.text = element_text(size=8), 
+        axis.title = element_text(size=12),
+        axis.line = element_line(colour= "darkgray", size=0),
+        panel.border=element_rect(colour= "darkgray", fill=NA, size=0.3),
+        legend.key.height = unit(0.2, 'cm'), legend.key.width = unit (0.4, 'cm'),
+        legend.position = "bottom", plot.title = element_text(size=12, face="bold",hjust=0.5)) + 
+  coord_flip() +
+  ggtitle("NSCLC Cohorts")
+
+ggsave(file.path(output_dir,"NbyStudy.pdf"), height=8, width = 3, pointsize=12, dpi=600)
+
+```
+
+
+```{r, Plot by EFO, include=FALSE}
+# Plot by EFO
+ngenomic <-left_join(ngenomic, cdisease, by=c("COSMIC_PHENOTYPE_ID"))
+
+nsclc_byefo <- ngenomic %>% 
+  distinct(COSMIC_SAMPLE_ID, INDIVIDUAL_ID, EFO_NAME) %>% 
+  group_by(EFO_NAME) %>%
+  count(EFO_NAME, sort = TRUE) %>%
+  mutate(EFO_NAME = str_to_title(EFO_NAME)) %>%
+  as.data.frame()
+
+nsclc_byefo$EFO_NAME <- factor(nsclc_byefo$EFO_NAME, level=rev(unique(nsclc_byefo$EFO_NAME)))
+
+ggplot(nsclc_byefo, aes(x=EFO_NAME, y=n)) +
+  geom_bar(stat = "identity", width=0.4, fill=wesanderson::wes_palettes$Zissou1[2]) + 
+  ylab("Number of Individuals") +
+  xlab("") +
+  theme_classic() +
+  theme(legend.title = element_blank(), axis.text = element_text(size=8), 
+        axis.title = element_text(size=12),
+        axis.line = element_line(colour= "darkgray", size=0),
+        panel.border=element_rect(colour= "darkgray", fill=NA, size=0.3),
+        legend.key.height = unit(0.2, 'cm'), legend.key.width = unit (0.4, 'cm'),
+        legend.position = "bottom",plot.title = element_text(size=12, face="bold",hjust=0.5)) + 
+  coord_flip() +
+  ggtitle("NSCLC EFO Subtypes")
+
+ggsave(file.path(output_dir,"NbyEFO.pdf"), height=2.3, width = 3.7, pointsize=12, dpi=600)
+
+```
+
+
+```{r, Plot by Tumor Source, include=FALSE}
+# Plot by Tumor Source
+nsclc_bytsource <- ngenomic %>% 
+  distinct(COSMIC_SAMPLE_ID, INDIVIDUAL_ID, TUMOUR_SOURCE) %>%
+  group_by(TUMOUR_SOURCE) %>%
+  count(TUMOUR_SOURCE, sort = TRUE) %>%
+  mutate(TUMOUR_SOURCE = str_to_title(TUMOUR_SOURCE)) %>%
+  mutate(TUMOUR_SOURCE = case_when (TUMOUR_SOURCE == "Ns" ~ "Unspecified", TUMOUR_SOURCE == "Metastasis" ~ "Metastatic", .default = TUMOUR_SOURCE)) %>%
+  mutate(TUMOUR_SOURCE = factor(TUMOUR_SOURCE, levels = c("Primary", "Unspecified", "Metastatic", "Recurrent"))) %>%
+  as.data.frame()
+
+ggplot(nsclc_bytsource, aes(x=TUMOUR_SOURCE, y=n)) +
+  geom_bar(stat = "identity", width=0.4, fill=wes_palettes$Zissou1[2]) + 
+  ylab("Number of Individuals") +
+  xlab("") +
+  theme_classic() +
+  theme(legend.title = element_blank(), axis.text = element_text(size=8), 
+        axis.title = element_text(size=12),
+        axis.line = element_line(colour= "darkgray", size=0),
+        panel.border=element_rect(colour= "darkgray", fill=NA, size=0.3),
+        legend.key.height = unit(0.2, 'cm'), legend.key.width = unit (0.4, 'cm'),
+        legend.position = "bottom",plot.title = element_text(size=12, face="bold",hjust=0.5), axis.text.x = element_text(angle=90, vjust=0.5, hjust=1)) + 
+  ggtitle("Tumor Source")
+
+ggsave(file.path(output_dir,"NbyTumourSource.paper.pdf"), height=2.6, width = 1.7, pointsize=12, dpi=600)
+
+```
+
+
+```{r, Plot by Sample Type, include=FALSE}
+# Plot by Sample Type
+nsclc_bysample <- ngenomic %>% 
+  distinct(COSMIC_SAMPLE_ID, INDIVIDUAL_ID, SAMPLE_TYPE) %>%
+  mutate(SAMPLE_TYPE = case_when (
+    SAMPLE_TYPE == "fresh/frozen - NOS" ~ "Fresh Frozen",
+    SAMPLE_TYPE == "surgery fresh/frozen" ~ "Fresh Frozen",
+    SAMPLE_TYPE == "circulating tumour" ~ "Circulating Tumor",
+    SAMPLE_TYPE == "surgery-fixed" ~ "Fixed",
+    SAMPLE_TYPE == "fixed - NOS" ~ "Fixed",
+    SAMPLE_TYPE == "NS" ~"Unspecified", .default = SAMPLE_TYPE)) %>%
+  group_by(SAMPLE_TYPE) %>%
+  count(SAMPLE_TYPE, sort = TRUE) %>%
+  mutate(SAMPLE_TYPE = str_to_title(SAMPLE_TYPE)) %>%
+  mutate(SAMPLE_TYPE = factor(SAMPLE_TYPE, levels = c("Fresh Frozen", "Unspecified", "Surgery - Nos", "Circulating Tumor", "Fixed"))) %>%
+  as.data.frame()
+
+ggplot(nsclc_bysample, aes(x=SAMPLE_TYPE, y=n)) +
+  geom_bar(stat = "identity", width=0.4, fill=wes_palettes$Zissou1[2]) + 
+  ylab("Number of Individuals") +
+  xlab("") +
+  theme_classic() +
+  theme(legend.title = element_blank(), axis.text = element_text(size=8), 
+        axis.title = element_text(size=12),
+        axis.line = element_line(colour= "darkgray", size=0),
+        panel.border=element_rect(colour= "darkgray", fill=NA, size=0.3),
+        legend.key.height = unit(0.2, 'cm'), legend.key.width = unit (0.4, 'cm'),
+        legend.position = "bottom",plot.title = element_text(size=12, face="bold",hjust=0.5), axis.text.x = element_text(angle=90, vjust=0.5, hjust=1)) + 
+  ggtitle("Sample Type")
+
+ggsave(file.path(output_dir,"NbySampleType.pdf"), height=2.9, width = 1.9, pointsize=12, dpi=600)
+
+```
+
+
+```{r, Plot by Assay Name, include=FALSE}
+# Plot by Assay Name
+nsclc_byassay <- ngenomic %>% 
+  mutate (ASSAY_NAME = case_when(
+    WHOLE_GENOME_SCREEN == "y" & WHOLE_EXOME_SCREEN == "y" ~ "WES+WGS",
+    WHOLE_GENOME_SCREEN == "y" & WHOLE_EXOME_SCREEN == "n" ~ "WGS",
+    WHOLE_GENOME_SCREEN == "n" & WHOLE_EXOME_SCREEN == "y" ~ "WES",
+  )) %>%
+  distinct(COSMIC_SAMPLE_ID, INDIVIDUAL_ID, ASSAY_NAME) %>%
+  group_by(ASSAY_NAME) %>%
+  count(ASSAY_NAME, sort = TRUE) %>%
+  mutate(ASSAY_NAME = factor(ASSAY_NAME, levels = c("WES", "WGS", "WES+WGS"))) %>%
+  as.data.frame()
+
+ggplot(nsclc_byassay, aes(x=ASSAY_NAME, y=n)) +
+  geom_bar(stat = "identity", width=0.4, fill=wesanderson::wes_palettes$Zissou1[2]) + 
+  ylab("Number of Individuals") +
+  xlab("") +
+  theme_classic() +
+  theme(legend.title = element_blank(), axis.text = element_text(size=8), 
+        axis.title = element_text(size=12),
+        axis.line = element_line(colour= "darkgray", size=0),
+        panel.border=element_rect(colour= "darkgray", fill=NA, size=0.3),
+        legend.key.height = unit(0.2, 'cm'), legend.key.width = unit (0.4, 'cm'),
+        legend.position = "bottom", plot.title = element_text(size=12, face="bold",hjust=0.5), axis.text.x = element_text(angle=90, vjust=0.5, hjust=1)) + 
+  ggtitle("Assay Name")
+
+ggsave(file.path(output_dir,"NbyAssay.pdf"), height=2.6, width = 1.5, pointsize=12, dpi=600)
+
+```
+
+
+```{r, Plot by Paired Data, include=FALSE}
+# Plot by Paired Data
+nsclc_paired <- ngenomic %>% 
+  mutate (NORMAL_TISSUE_TESTED = case_when(
+    NORMAL_TISSUE_TESTED == "y" ~ "Yes",
+    NORMAL_TISSUE_TESTED == "n"  ~ "No",
+    NORMAL_TISSUE_TESTED== "" ~ "Unspecified",
+  )) %>% 
+  distinct(COSMIC_SAMPLE_ID, INDIVIDUAL_ID, NORMAL_TISSUE_TESTED) %>%
+  group_by(NORMAL_TISSUE_TESTED) %>%
+  count(NORMAL_TISSUE_TESTED, sort = TRUE) %>%
+  mutate(NORMAL_TISSUE_TESTED = factor(NORMAL_TISSUE_TESTED, levels = c("Unspecified", "Yes", "No"))) %>%
+  as.data.frame()
+
+
+ggplot(nsclc_paired, aes(x=NORMAL_TISSUE_TESTED, y=n)) +
+  geom_bar(stat = "identity", width=0.4, fill=wes_palettes$Zissou1[2]) + 
+  ylab("Number of Individuals") +
+  xlab("") +
+  theme_classic() +
+  theme(legend.title = element_blank(), axis.text = element_text(size=8), 
+        axis.title = element_text(size=12),
+        axis.line = element_line(colour= "darkgray", size=0),
+        panel.border=element_rect(colour= "darkgray", fill=NA, size=0.3),
+        legend.key.height = unit(0.2, 'cm'), legend.key.width = unit (0.4, 'cm'),
+        legend.position = "bottom",plot.title = element_text(size=12, face="bold",hjust=0.5), axis.text.x = element_text(angle=90, vjust=0.5, hjust=1)) + 
+  ggtitle("Paired Data")
+
+ggsave(file.path(output_dir,"NbyPaired.pdf"), height=2.6, width = 1.5, pointsize=12, dpi=600)
+
+```
+
+
+```{r, Plot by Age, include=FALSE}
+# Plot by Age
+nsclc_age <- ngenomic %>% 
+  distinct(COSMIC_SAMPLE_ID, INDIVIDUAL_ID, AGE)
+
+ggplot(nsclc_age, aes(x=AGE)) +
+  geom_histogram(color="#e1bd99", linewidth = 0.2, fill=wesanderson::wes_palettes$Moonrise2[2]) + 
+  ylab("Number of Individuals") +
+  xlab("Age") +
+  theme_classic() +
+  theme(legend.title = element_blank(), axis.text = element_text(size=8), 
+        axis.title = element_text(size=12),
+        axis.line = element_line(colour= "darkgray", size=0),
+        panel.border=element_rect(colour= "darkgray", fill=NA, size=0.3),
+        legend.key.height = unit(0.2, 'cm'), legend.key.width = unit (0.4, 'cm'),
+        legend.position = "bottom",plot.title = element_text(size=12, face="bold",hjust=0.5)) +
+  ggtitle("Age")
+
+ggsave(file.path(output_dir,"NbyAge.pdf"), height=2.3, width = 3.5, pointsize=12, dpi=600)
+
+```
+
+
+```{r, Plot by Ethnicity, include=FALSE}
+# Plot by Ethnicity
+nsclc_eth <- ngenomic %>% 
+  mutate (ETHNICITY = if_else(is.na(ETHNICITY), "Unknown", ETHNICITY)) %>% 
+  mutate (ETHNICITY = if_else(ETHNICITY == "Native American", "Nat American", ETHNICITY)) %>% 
+  distinct(COSMIC_SAMPLE_ID, INDIVIDUAL_ID, ETHNICITY) %>%
+  group_by(ETHNICITY) %>%
+  count(ETHNICITY, sort = TRUE) %>%
+  as.data.frame()
+
+nsclc_eth$ETHNICITY <- factor(nsclc_eth$ETHNICITY, level=rev(unique(nsclc_eth$ETHNICITY)))
+
+ggplot(nsclc_eth, aes(x=ETHNICITY, y=n)) +
+  geom_bar(stat = "identity", width=0.4, fill=wesanderson::wes_palettes$Moonrise2[2]) + 
+  ylab("Number of Individuals") +
+  xlab("") +
+  theme_classic() +
+  theme(legend.title = element_blank(), axis.text = element_text(size=8), 
+        axis.title = element_text(size=12),
+        axis.line = element_line(colour= "darkgray", size=0),
+        panel.border=element_rect(colour= "darkgray", fill=NA, size=0.3),
+        legend.key.height = unit(0.2, 'cm'), legend.key.width = unit (0.4, 'cm'),
+        legend.position = "bottom",plot.title = element_text(size=12, face="bold",hjust=0.5), axis.text.x = element_text(angle=90, vjust=0.5, hjust=1)) + 
+  ggtitle("Ethnicity") + coord_flip()
+
+ggsave(file.path(output_dir,"NbyEthnicity.pdf"), height=2.3, width = 2.7, pointsize=12, dpi=600)
+
+```
+
+
+```{r, Plot by Smoking, include=FALSE}
+# Plot by Smoking
+nsclc_smoking <- ngenomic %>% 
+  distinct(COSMIC_SAMPLE_ID, INDIVIDUAL_ID, SMOKING_STATUS) %>%
+  group_by(SMOKING_STATUS) %>%
+  count(SMOKING_STATUS, sort = TRUE) %>%
+  mutate(SMOKING_STATUS = str_to_title(SMOKING_STATUS)) %>%
+  mutate(SMOKING_STATUS = if_else(is.na(SMOKING_STATUS), "Unknown", SMOKING_STATUS)) %>% 
+  mutate(SMOKING_STATUS = factor(SMOKING_STATUS, levels = c("Smoker", "Unknown", "Nonsmoker"))) %>%
+  as.data.frame()
+
+ggplot(nsclc_smoking, aes(x=SMOKING_STATUS, y=n)) +
+  geom_bar(stat = "identity", width=0.4, fill=wesanderson::wes_palettes$Moonrise2[2]) + 
+  ylab("Number of Individuals") +
+  xlab("") +
+  theme_classic() +
+  theme(legend.title = element_blank(), axis.text = element_text(size=8), 
+        axis.title = element_text(size=12),
+        axis.line = element_line(colour= "darkgray", size=0),
+        panel.border=element_rect(colour= "darkgray", fill=NA, size=0.3),
+        legend.key.height = unit(0.2, 'cm'), legend.key.width = unit (0.4, 'cm'),
+        legend.position = "bottom",plot.title = element_text(size=12, face="bold",hjust=0.5), axis.text.x = element_text(angle=90, vjust=0.5, hjust=1)) + 
+  ggtitle("Smoking History")
+
+ggsave(file.path(output_dir,"NbySmoking.pdf"), height=2.6, width = 1.9, pointsize=12, dpi=600)
+
+```
+
+
+```{r, Mutation Level Exclusions, include=FALSE}
+# Mutation Level Exclusions
+
+# Study Subjects
+ind.ids <- ngenomic %>% select(COSMIC_SAMPLE_ID, COSMIC_PHENOTYPE_ID, PUBMED_PMID, COSMIC_STUDY_ID, SAMPLE_TYPE, WHOLE_GENOME_SCREEN, WHOLE_EXOME_SCREEN, TUMOUR_SOURCE, NORMAL_TISSUE_TESTED, INDIVIDUAL_ID, GENDER, STUDY_NAME, AGE, ETHNICITY, SMOKING_STATUS, EFO, EFO_NAME) %>% distinct()
+
+# Exclude GNOMAD_GENOMES_MAF > 0.0001 & EXAC_MAF > 0.0001
+cmaf <- cmutation %>% 
+  select(GENOMIC_MUTATION_ID, GNOMAD_GENOMES_AF, EXAC_AF) %>% 
+  distinct(GENOMIC_MUTATION_ID, .keep_all = TRUE) %>%
+  mutate (GNOMAD_GENOMES_MAF = if_else (GNOMAD_GENOMES_AF <= 0.5, GNOMAD_GENOMES_AF, 1-GNOMAD_GENOMES_AF),
+          EXAC_MAF = if_else (EXAC_AF <= 0.5, EXAC_AF,1-EXAC_AF)) %>%
+  filter (GNOMAD_GENOMES_MAF > 0.0001 | EXAC_MAF > 0.0001 )
+  
+ngenomic <- ngenomic %>% filter (!GENOMIC_MUTATION_ID %in% cmaf$GENOMIC_MUTATION_ID)
+
+# Exclude based on Mutation Type
+# Annotated "intronic" based on all transcript annotations
+ngenomic <- ngenomic %>% filter (!MUTATION_DESCRIPTION == "intron_variant")
+
+# Add back 24 individuals who do not have rare somatic mutations
+ind.toadd <- ind.ids %>% filter (!INDIVIDUAL_ID %in% ngenomic$INDIVIDUAL_ID)
+ngenomic <- bind_rows (ngenomic, ind.toadd)
+
+# Standardize Unknown Variables that will be used in linear regressions
+ngenomic  <- ngenomic %>%
+  mutate(GENDER = na_if(GENDER, "u")) %>%
+  mutate(SAMPLE_TYPE = na_if(SAMPLE_TYPE, "NS")) %>%
+  mutate(TUMOUR_SOURCE = na_if(TUMOUR_SOURCE, "NS")) %>%
+  mutate(NORMAL_TISSUE_TESTED = na_if(NORMAL_TISSUE_TESTED, "")) %>%
+  mutate (ASSAY_NAME = case_when(
+    WHOLE_GENOME_SCREEN == "y" & WHOLE_EXOME_SCREEN == "y" ~ "WES+WGS",
+    WHOLE_GENOME_SCREEN == "y" & WHOLE_EXOME_SCREEN == "n" ~ "WGS",
+    WHOLE_GENOME_SCREEN == "n" & WHOLE_EXOME_SCREEN == "y" ~ "WES",
+  ))
+
+write.table(ngenomic, gzfile(file.path(output_dir,"NSCLC.Genomic.Clean.txt.gz")), row.names = FALSE, sep="\t",quote=FALSE)
+
+```
+
