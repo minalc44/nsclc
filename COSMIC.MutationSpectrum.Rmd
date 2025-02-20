@@ -1,6 +1,6 @@
 ---
 title: "Cosmic Mutation Spectrum"
-author: ""Vaibhavi Pathak, Minal Caliskan""
+author: "Vaibhavi Pathak, Minal Caliskan"
 date: "02/23/2024"
 output: html_document
 ---

@@ -1,6 +1,6 @@
 ---
 title: "Genotype Covariate Association"
-author: "Minal Caliskan, Vaibhavi Pathak"
+author: "Vaibhavi Pathak, Minal Caliskan"
 date: "03/20/2024"
 output: html_document
 ---

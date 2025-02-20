@@ -1,6 +1,6 @@
 ## NSCLC COSMIC Genome-Screen Analysis
 
-This repository includes the code that was used for the NSCLC COSMIC Genome-Screen manuscript ()
+This repository includes the code that was used for the NSCLC COSMIC Genome-Screen manuscript: 
 
 ### Third-party Components
 This project used several third-party tools. License information was verified at the time of usage for each tool and listed below.
